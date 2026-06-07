@@ -1,12 +1,15 @@
 # NYC Flights Big Data Analysis
 
-An R Markdown analysis of the `nycflights13` dataset that combines flight records with weather data to explore delays from New York City airports.
+Final presentation and supporting R Markdown analysis for a `nycflights13` flight delay project. The analysis combines NYC flight records with weather data to explore delay patterns from New York City airports.
 
 ## Project Contents
 
-- `nycflights.Rmd`: main R Markdown source file
+- `finalPresentation.pptx`: final project presentation
+- `nycflights.Rmd`: cleaned R Markdown analysis source
+- `nycFlights-original.Rmd`: original class-folder R Markdown source
 - `nyc-flights-big-data-analysis.html`: rendered HTML report
-- `nyc-flights-big-data-analysis.pdf`: rendered PDF report
+- `figures/`: generated figure PDFs from the R Markdown output
+- `Big Data Analysis.Rproj`: RStudio project file
 
 ## Analysis Overview
 

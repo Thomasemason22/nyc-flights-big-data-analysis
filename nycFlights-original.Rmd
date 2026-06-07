@@ -1,0 +1,135 @@
+---
+title: "NYC Flights Big Data Analysis"
+author: "Thomas Mason"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(nycflights13)
+library(lubridate)
+library(cluster)
+library(arules)
+library(arulesViz)
+library(ggplot2)
+library(GGally)
+```
+
+```{r}
+# 1. Load and merge datasets
+flights_df <- nycflights13::flights %>%
+  select(
+    year, month, day, dep_delay, arr_delay, carrier,
+    air_time, distance, origin, time_hour
+  )
+
+weather_df <- nycflights13::weather %>%
+  select(
+    time_hour,
+    temp,
+    wind_speed,
+    visib
+  )
+
+# Merge flight and weather data
+df <- flights_df %>%
+  left_join(weather_df, by = "time_hour") %>%
+  drop_na(dep_delay, arr_delay, air_time, distance, temp, wind_speed, visib) %>%
+  mutate(
+    carrier = as.factor(carrier),
+    month = as.numeric(month),
+    delay_cat = case_when(
+      arr_delay <= 0 ~ "On Time",
+      arr_delay <= 30 ~ "Minor Delay",
+      arr_delay > 30 ~ "Major Delay"
+    )
+  )
+
+# Check structure
+str(df$month)
+```
+
+```{r}
+# 3. Regression analysis
+reg_model <- lm(arr_delay ~ dep_delay + air_time + distance +
+                  temp + wind_speed + visib + carrier,
+                data = df)
+
+summary(reg_model)
+```
+
+```{r}
+# 4. Clustering
+cluster_data <- df %>%
+  select(dep_delay, arr_delay, air_time, distance, temp, wind_speed, visib) %>%
+  scale()
+
+set.seed(123)
+k <- kmeans(cluster_data, centers = 3)
+
+df$cluster <- as.factor(k$cluster)
+
+# Cluster visualization
+ggplot(df, aes(arr_delay, dep_delay, color = cluster)) +
+  geom_point(alpha = 0.3) +
+  theme_minimal() +
+  labs(title = "Flight Delay Clusters")
+```
+
+```{r}
+# 5. Association Rules
+df_arules <- df %>% 
+  select(delay_cat, carrier) %>%
+  mutate(across(everything(), as.factor))
+
+transactions <- as(df_arules, "transactions")
+
+rules <- apriori(transactions, parameter = list(supp = 0.01, conf = 0.5))
+
+inspect(head(rules))
+```
+
+```{r}
+# 6. Visualizations
+
+# Histogram of arrival delays
+ggplot(df, aes(arr_delay)) +
+  geom_histogram(bins = 60) +
+  theme_minimal() +
+  labs(title = "Distribution of Arrival Delays", x = "Arrival Delay (minutes)", y = "Count")
+
+# Weather impact on delays
+ggplot(df, aes(temp, arr_delay)) +
+  geom_point(alpha=0.25) +
+  theme_minimal() +
+  labs(title = "Temperature vs Arrival Delay", x = "Temperature (°F)", y = "Arrival Delay (minutes)")
+
+# Boxplot by month
+ggplot(df, aes(factor(month), arr_delay)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Arrival Delay by Month", x = "Month", y = "Arrival Delay (minutes)")
+
+# Average delay by carrier
+df %>%
+  group_by(carrier) %>%
+  summarise(avg_delay = mean(arr_delay, na.rm = TRUE)) %>%
+  arrange(avg_delay) %>%
+  ggplot(aes(x = reorder(carrier, avg_delay), y = avg_delay)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(x = "Carrier", y = "Average Arrival Delay (minutes)", 
+       title = "Average Arrival Delay by Carrier")
+
+# Scatterplot matrix for weather variables vs delays
+weather_vars <- df %>%
+  select(arr_delay, dep_delay, temp, wind_speed, visib)
+
+GGally::ggpairs(weather_vars) +
+  theme_minimal() +
+  labs(title = "Correlation Matrix: Delays and Weather Variables")
+```
