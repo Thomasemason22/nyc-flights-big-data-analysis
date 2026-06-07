@@ -1,0 +1,10 @@
+.DS_Store
+.Rhistory
+.RData
+.RDataTmp*
+.Rproj.user/
+*.log
+*.aux
+*.out
+*.toc
+*.synctex.gz
