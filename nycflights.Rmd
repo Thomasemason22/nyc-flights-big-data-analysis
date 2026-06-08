@@ -1,18 +1,72 @@
 ---
-title: "NYC Flights Big Data Analysis"
+title: "NYC Flights Delay Analysis"
+subtitle: "Flight performance patterns using `nycflights13` and weather data"
 author:
   - "Thomas Mason"
   - "Will Anan"
+date: "December 2025"
 output:
-  html_document: default
-  pdf_document: default
-  word_document: default
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    fig_width: 10
+    fig_height: 5.8
+    theme: cosmo
+    df_print: paged
 ---
+
+<style>
+body {
+  font-size: 16px;
+  line-height: 1.55;
+}
+h1, h2, h3 {
+  font-weight: 700;
+}
+.title {
+  font-weight: 800;
+}
+.subtitle {
+  color: #4b5563;
+}
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 14px;
+  margin: 22px 0 28px;
+}
+.metric-card {
+  border: 1px solid #e5e7eb;
+  border-left: 5px solid #2563eb;
+  border-radius: 6px;
+  padding: 14px 16px;
+  background: #f8fafc;
+}
+.metric-value {
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: #111827;
+}
+.metric-label {
+  color: #4b5563;
+  font-size: 0.92rem;
+}
+.callout {
+  border-left: 5px solid #0f766e;
+  background: #f0fdfa;
+  padding: 14px 18px;
+  margin: 20px 0;
+  border-radius: 6px;
+}
+</style>
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo = TRUE,
+  echo = FALSE,
   message = FALSE,
-  warning = FALSE
+  warning = FALSE,
+  fig.align = "center"
 )
 
 library(tidyverse)
@@ -23,168 +77,405 @@ library(arules)
 library(arulesViz)
 library(ggplot2)
 library(GGally)
+
+report_palette <- c(
+  navy = "#1f4e79",
+  blue = "#2f80ed",
+  teal = "#0f766e",
+  gold = "#d97706",
+  red = "#b91c1c",
+  gray = "#6b7280"
+)
+
+theme_report <- function() {
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold", size = 18, color = "#111827"),
+      plot.subtitle = element_text(size = 11, color = "#4b5563"),
+      axis.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom"
+    )
+}
+
+format_number <- function(x) format(x, big.mark = ",", trim = TRUE)
 ```
 
-```{r}
-# 1. Load and merge datasets
-
-# Flights data
+```{r data-prep, include=FALSE}
 flights_df <- nycflights13::flights %>%
   select(
     year, month, day, dep_delay, arr_delay, carrier,
-    air_time, distance, origin, time_hour
+    air_time, distance, origin, dest, time_hour
   )
 
-# Weather data: aggregate to one row per time_hour to avoid many-to-many join
 weather_df <- nycflights13::weather %>%
   select(time_hour, temp, wind_speed, visib) %>%
   group_by(time_hour) %>%
   summarise(
-    temp       = mean(temp, na.rm = TRUE),
+    temp = mean(temp, na.rm = TRUE),
     wind_speed = mean(wind_speed, na.rm = TRUE),
-    visib      = mean(visib, na.rm = TRUE),
-    .groups    = "drop"
+    visib = mean(visib, na.rm = TRUE),
+    .groups = "drop"
   )
 
-# Merge flight and weather data
 df <- flights_df %>%
   left_join(weather_df, by = "time_hour") %>%
   drop_na(dep_delay, arr_delay, air_time, distance, temp, wind_speed, visib) %>%
   mutate(
-    carrier  = as.factor(carrier),
-    month    = as.numeric(month),
+    carrier = as.factor(carrier),
+    month = as.numeric(month),
     delay_cat = case_when(
-      arr_delay <= 0  ~ "On Time",
+      arr_delay <= 0 ~ "On Time",
       arr_delay <= 30 ~ "Minor Delay",
-      arr_delay >  30 ~ "Major Delay"
-    )
-  )
+      TRUE ~ "Major Delay"
+    ),
+    delay_cat = factor(delay_cat, levels = c("On Time", "Minor Delay", "Major Delay")),
+    month_name = factor(month.abb[month], levels = month.abb),
+    delayed = arr_delay > 15
+  ) %>%
+  left_join(nycflights13::airlines, by = "carrier")
 
-# Quick structure checks
-str(df)
-summary(df$arr_delay)
+total_flights <- nrow(df)
+arrival_delay_avg <- mean(df$arr_delay, na.rm = TRUE)
+departure_delay_avg <- mean(df$dep_delay, na.rm = TRUE)
+delay_rate <- mean(df$delayed, na.rm = TRUE)
+major_delay_rate <- mean(df$delay_cat == "Major Delay", na.rm = TRUE)
+best_carrier <- df %>%
+  group_by(carrier, name) %>%
+  summarise(avg_arrival_delay = mean(arr_delay), flights = n(), .groups = "drop") %>%
+  filter(flights >= 1000) %>%
+  arrange(avg_arrival_delay) %>%
+  slice(1)
+worst_carrier <- df %>%
+  group_by(carrier, name) %>%
+  summarise(avg_arrival_delay = mean(arr_delay), flights = n(), .groups = "drop") %>%
+  filter(flights >= 1000) %>%
+  arrange(desc(avg_arrival_delay)) %>%
+  slice(1)
 ```
 
+# Executive Summary
 
-```{r}
-# Linear regression: arrival delay as a function of flight + weather features
+This report analyzes **`r format_number(total_flights)` complete 2013 flight records** from New York City airports and combines them with hourly weather conditions. The goal is to identify the patterns most associated with arrival delays and to present the results in a readable, decision-oriented format.
+
+<div class="metric-grid">
+  <div class="metric-card">
+    <div class="metric-value">`r format_number(total_flights)`</div>
+    <div class="metric-label">complete flight records analyzed</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">`r round(arrival_delay_avg, 1)` min</div>
+    <div class="metric-label">average arrival delay</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">`r scales::percent(delay_rate, accuracy = 0.1)`</div>
+    <div class="metric-label">flights delayed more than 15 minutes</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">`r scales::percent(major_delay_rate, accuracy = 0.1)`</div>
+    <div class="metric-label">flights delayed more than 30 minutes</div>
+  </div>
+</div>
+
+<div class="callout">
+The strongest result is practical: departure delay explains most of the arrival-delay variation. Weather and carrier differences still matter, but the operational starting point is preventing late departures from compounding into late arrivals.
+</div>
+
+# Data Preparation
+
+The analysis uses the `flights` and `weather` tables from `nycflights13`. Weather readings were aggregated to one row per hour before merging, which avoids the many-to-many join problem that made the earlier knit output noisy.
+
+```{r data-summary}
+summary_table <- tibble(
+  Metric = c(
+    "Flight records after cleaning",
+    "Average departure delay",
+    "Average arrival delay",
+    "Median arrival delay",
+    "Longest arrival delay",
+    "Carriers represented"
+  ),
+  Value = c(
+    format_number(total_flights),
+    paste0(round(departure_delay_avg, 1), " minutes"),
+    paste0(round(arrival_delay_avg, 1), " minutes"),
+    paste0(round(median(df$arr_delay), 1), " minutes"),
+    paste0(format_number(max(df$arr_delay)), " minutes"),
+    format_number(n_distinct(df$carrier))
+  )
+)
+
+knitr::kable(summary_table, align = c("l", "r"))
+```
+
+# Delay Distribution
+
+Most flights arrive close to schedule, but the right tail is long. A small share of flights creates a large amount of passenger disruption.
+
+```{r delay-distribution}
+ggplot(df, aes(x = pmax(pmin(arr_delay, 180), -60))) +
+  geom_histogram(binwidth = 5, fill = report_palette["blue"], color = "white", alpha = 0.92) +
+  geom_vline(xintercept = 0, color = report_palette["teal"], linewidth = 1) +
+  geom_vline(xintercept = 30, color = report_palette["red"], linewidth = 1, linetype = "dashed") +
+  annotate("text", x = 5, y = Inf, label = "On time", vjust = 1.8, hjust = 0, color = report_palette["teal"]) +
+  annotate("text", x = 35, y = Inf, label = "Major delay threshold", vjust = 3.2, hjust = 0, color = report_palette["red"]) +
+  scale_x_continuous(labels = function(x) paste0(x, "m")) +
+  labs(
+    title = "Arrival delays are concentrated near zero, with a long late-arrival tail",
+    subtitle = "Values are capped from -60 to 180 minutes for readability.",
+    x = "Arrival delay",
+    y = "Number of flights"
+  ) +
+  theme_report()
+```
+
+```{r delay-category}
+delay_category <- df %>%
+  count(delay_cat) %>%
+  mutate(share = n / sum(n))
+
+ggplot(delay_category, aes(x = delay_cat, y = share, fill = delay_cat)) +
+  geom_col(width = 0.68) +
+  geom_text(aes(label = scales::percent(share, accuracy = 0.1)), vjust = -0.45, fontface = "bold") +
+  scale_y_continuous(labels = scales::percent, limits = c(0, max(delay_category$share) + 0.08)) +
+  scale_fill_manual(values = c("On Time" = report_palette["teal"], "Minor Delay" = report_palette["gold"], "Major Delay" = report_palette["red"])) +
+  labs(
+    title = "Delay categories show the project impact in plain terms",
+    subtitle = "On-time flights arrived early or at schedule; minor delays are 1-30 minutes; major delays are more than 30 minutes.",
+    x = NULL,
+    y = "Share of flights"
+  ) +
+  theme_report() +
+  theme(legend.position = "none")
+```
+
+# Regression Results
+
+```{r regression, include=FALSE}
 reg_model <- lm(
-  arr_delay ~ dep_delay + air_time + distance +
-    temp + wind_speed + visib + carrier,
+  arr_delay ~ dep_delay + air_time + distance + temp + wind_speed + visib + carrier,
   data = df
 )
 
-summary(reg_model)
+reg_summary <- summary(reg_model)
+r_squared <- reg_summary$r.squared
+adj_r_squared <- reg_summary$adj.r.squared
+
+coef_table <- broom::tidy(reg_model) %>%
+  filter(term %in% c("dep_delay", "air_time", "distance", "temp", "wind_speed", "visib")) %>%
+  mutate(
+    Term = dplyr::recode(
+      term,
+      dep_delay = "Departure delay",
+      air_time = "Air time",
+      distance = "Distance",
+      temp = "Temperature",
+      wind_speed = "Wind speed",
+      visib = "Visibility"
+    ),
+    Estimate = round(estimate, 3),
+    `p-value` = if_else(p.value < 0.001, "< 0.001", as.character(round(p.value, 3)))
+  ) %>%
+  select(Term, Estimate, `p-value`)
 ```
 
-```{r}
-# Select numeric variables for clustering
-cluster_data <- df %>%
+The regression model explains **`r scales::percent(r_squared, accuracy = 0.1)`** of arrival-delay variation. Departure delay is the clearest predictor: each additional minute of departure delay corresponds to roughly **`r round(coef(reg_model)["dep_delay"], 2)` additional minute** of arrival delay, after controlling for distance, air time, weather, and carrier.
+
+```{r regression-table}
+knitr::kable(coef_table, align = c("l", "r", "r"))
+```
+
+```{r departure-arrival-relationship}
+set.seed(123)
+scatter_sample <- df %>% sample_n(min(25000, nrow(df)))
+
+ggplot(scatter_sample, aes(x = dep_delay, y = arr_delay)) +
+  geom_point(alpha = 0.18, color = report_palette["navy"], size = 0.7) +
+  geom_smooth(method = "lm", color = report_palette["red"], linewidth = 1.2, se = FALSE) +
+  coord_cartesian(xlim = c(-30, 180), ylim = c(-60, 180)) +
+  labs(
+    title = "Departure delay is the dominant driver of arrival delay",
+    subtitle = "A sampled view makes the relationship readable while preserving the pattern.",
+    x = "Departure delay (minutes)",
+    y = "Arrival delay (minutes)"
+  ) +
+  theme_report()
+```
+
+# Carrier Differences
+
+Carrier performance varies after cleaning for complete records. The chart below only includes carriers with at least 1,000 analyzed flights to avoid over-reading very small samples.
+
+```{r carrier-performance}
+carrier_summary <- df %>%
+  group_by(carrier, name) %>%
+  summarise(
+    flights = n(),
+    avg_arrival_delay = mean(arr_delay),
+    delayed_share = mean(delayed),
+    .groups = "drop"
+  ) %>%
+  filter(flights >= 1000) %>%
+  arrange(avg_arrival_delay)
+
+ggplot(carrier_summary, aes(x = reorder(carrier, avg_arrival_delay), y = avg_arrival_delay)) +
+  geom_col(aes(fill = avg_arrival_delay > 0), width = 0.72) +
+  geom_text(aes(label = paste0(round(avg_arrival_delay, 1), "m")), hjust = -0.12, size = 3.4) +
+  coord_flip() +
+  scale_fill_manual(values = c(`TRUE` = report_palette["red"], `FALSE` = report_palette["teal"])) +
+  labs(
+    title = "Average arrival delay differs meaningfully by carrier",
+    subtitle = paste0("Best among larger carriers: ", best_carrier$carrier, ". Highest average delay: ", worst_carrier$carrier, "."),
+    x = "Carrier",
+    y = "Average arrival delay (minutes)"
+  ) +
+  theme_report() +
+  theme(legend.position = "none")
+```
+
+# Monthly and Weather Patterns
+
+Delays are not evenly distributed across the year. Seasonal pressure, airport congestion, and weather disruptions show up in the monthly averages.
+
+```{r monthly-delay}
+monthly_summary <- df %>%
+  group_by(month_name) %>%
+  summarise(
+    avg_arrival_delay = mean(arr_delay),
+    avg_departure_delay = mean(dep_delay),
+    major_delay_share = mean(delay_cat == "Major Delay"),
+    .groups = "drop"
+  )
+
+monthly_long <- monthly_summary %>%
+  select(month_name, avg_arrival_delay, avg_departure_delay) %>%
+  pivot_longer(-month_name, names_to = "metric", values_to = "minutes") %>%
+  mutate(metric = dplyr::recode(metric, avg_arrival_delay = "Arrival delay", avg_departure_delay = "Departure delay"))
+
+ggplot(monthly_long, aes(x = month_name, y = minutes, color = metric, group = metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.6) +
+  scale_color_manual(values = c("Arrival delay" = report_palette["blue"], "Departure delay" = report_palette["gold"])) +
+  labs(
+    title = "Delay pressure changes across the year",
+    subtitle = "Departure and arrival delays move together, reinforcing the regression result.",
+    x = NULL,
+    y = "Average delay (minutes)",
+    color = NULL
+  ) +
+  theme_report()
+```
+
+```{r weather-impact}
+weather_bins <- df %>%
+  mutate(
+    visibility_bucket = cut(
+      visib,
+      breaks = c(-Inf, 2, 5, 8, Inf),
+      labels = c("Very low", "Low", "Moderate", "Clear")
+    )
+  ) %>%
+  group_by(visibility_bucket) %>%
+  summarise(
+    flights = n(),
+    avg_arrival_delay = mean(arr_delay),
+    major_delay_share = mean(delay_cat == "Major Delay"),
+    .groups = "drop"
+  )
+
+ggplot(weather_bins, aes(x = visibility_bucket, y = avg_arrival_delay, fill = visibility_bucket)) +
+  geom_col(width = 0.68) +
+  geom_text(aes(label = paste0(round(avg_arrival_delay, 1), "m")), vjust = -0.4, fontface = "bold") +
+  scale_fill_manual(values = c("Very low" = report_palette["red"], "Low" = report_palette["gold"], "Moderate" = report_palette["blue"], "Clear" = report_palette["teal"])) +
+  labs(
+    title = "Lower visibility is associated with higher arrival delays",
+    subtitle = "Weather is not the only cause, but poor visibility increases disruption risk.",
+    x = "Visibility level",
+    y = "Average arrival delay (minutes)"
+  ) +
+  theme_report() +
+  theme(legend.position = "none")
+```
+
+# Clustering Flight Delay Profiles
+
+K-means clustering groups flights into three broad operational profiles based on delay, distance, air time, and weather variables.
+
+```{r clustering}
+set.seed(123)
+cluster_source <- df %>%
+  sample_n(min(50000, nrow(df)))
+
+cluster_data <- cluster_source %>%
   select(dep_delay, arr_delay, air_time, distance, temp, wind_speed, visib) %>%
   scale()
 
-set.seed(123)
-k <- kmeans(cluster_data, centers = 3)
+k <- kmeans(cluster_data, centers = 3, nstart = 20)
 
-df$cluster <- as.factor(k$cluster)
+clustered <- cluster_source %>%
+  mutate(cluster = factor(k$cluster)) %>%
+  group_by(cluster) %>%
+  mutate(
+    cluster_avg_delay = mean(arr_delay),
+    cluster_label = paste0("Profile ", cluster, ": ", round(cluster_avg_delay, 1), "m avg arrival delay")
+  ) %>%
+  ungroup()
 
-# Cluster visualization: arrival vs departure delay colored by cluster
-ggplot(df, aes(x = arr_delay, y = dep_delay, color = cluster)) +
-  geom_point(alpha = 0.3) +
-  theme_minimal() +
+ggplot(clustered, aes(x = dep_delay, y = arr_delay, color = cluster_label)) +
+  geom_point(alpha = 0.22, size = 0.8) +
+  coord_cartesian(xlim = c(-30, 180), ylim = c(-60, 180)) +
+  scale_color_manual(values = c(report_palette["teal"], report_palette["blue"], report_palette["red"])) +
   labs(
-    title = "Flight Delay Clusters",
-    x = "Arrival Delay (minutes)",
-    y = "Departure Delay (minutes)",
-    color = "Cluster"
-  )
+    title = "Clustering separates flights into delay profiles",
+    subtitle = "The most delayed cluster sits in the upper-right region where departure and arrival delays compound.",
+    x = "Departure delay (minutes)",
+    y = "Arrival delay (minutes)",
+    color = NULL
+  ) +
+  theme_report()
 ```
 
-```{r}
-# Prepare data for association rules: delay category and carrier
-df_arules <- df %>% 
+# Association Rules
+
+Association rule mining was used to identify common relationships between carriers and delay categories. The table reports the strongest rules by lift, which highlights rules that are more distinctive than simple frequency alone.
+
+```{r association-rules}
+df_arules <- df %>%
   select(delay_cat, carrier) %>%
   mutate(across(everything(), as.factor))
 
-# (Optional) sample down if machine is slow
-# set.seed(123)
-# df_arules <- df_arules %>% sample_n(50000)
-
 transactions <- as(df_arules, "transactions")
 
-# Mine association rules
 rules <- apriori(
   transactions,
-  parameter = list(supp = 0.01, conf = 0.5)
+  parameter = list(supp = 0.01, conf = 0.5, minlen = 2),
+  control = list(verbose = FALSE)
 )
 
-# Inspect first few strongest rules (by lift)
-inspect(head(sort(rules, by = "lift")))
-```
-
-```{r}
-# Histogram of arrival delays
-ggplot(df, aes(x = arr_delay)) +
-  geom_histogram(bins = 60) +
-  theme_minimal() +
-  labs(
-    title = "Distribution of Arrival Delays",
-    x = "Arrival Delay (minutes)",
-    y = "Count"
+rules_table <- sort(rules, by = "lift") %>%
+  head(8) %>%
+  DATAFRAME() %>%
+  transmute(
+    If = LHS,
+    Then = RHS,
+    support,
+    confidence,
+    lift
+  ) %>%
+  mutate(
+    support = scales::percent(support, accuracy = 0.1),
+    confidence = scales::percent(confidence, accuracy = 0.1),
+    lift = round(lift, 2)
   )
+
+knitr::kable(rules_table, align = c("l", "r", "r", "r"))
 ```
 
-```{r}
-# Weather impact on delays: Temperature vs Arrival Delay
-ggplot(df, aes(x = temp, y = arr_delay)) +
-  geom_point(alpha = 0.25) +
-  theme_minimal() +
-  labs(
-    title = "Temperature vs Arrival Delay",
-    x = "Temperature (°F)",
-    y = "Arrival Delay (minutes)"
-  )
-```
+# Key Takeaways
 
-```{r}
-# Boxplot of arrival delays by month
-ggplot(df, aes(x = factor(month), y = arr_delay)) +
-  geom_boxplot() +
-  theme_minimal() +
-  labs(
-    title = "Arrival Delay by Month",
-    x = "Month",
-    y = "Arrival Delay (minutes)"
-  )
-```
+1. **Departure delay is the central predictor.** The regression model explains `r scales::percent(r_squared, accuracy = 0.1)` of arrival-delay variation, and departure delay carries the strongest practical interpretation.
+2. **Carrier differences are visible.** Some carriers have materially higher average arrival delays, suggesting operational differences beyond weather alone.
+3. **Weather still matters.** Lower visibility and seasonal conditions increase disruption risk, even if they do not explain as much variation as late departures.
+4. **Clusters reveal delay profiles.** Flights naturally separate into on-time, moderately delayed, and heavily delayed groups.
 
-```{r}
-# Average delay by carrier
-df %>%
-  group_by(carrier) %>%
-  summarise(avg_delay = mean(arr_delay, na.rm = TRUE)) %>%
-  arrange(avg_delay) %>%
-  ggplot(aes(x = reorder(carrier, avg_delay), y = avg_delay)) +
-  geom_col() +
-  coord_flip() +
-  theme_minimal() +
-  labs(
-    x = "Carrier",
-    y = "Average Arrival Delay (minutes)",
-    title = "Average Arrival Delay by Carrier"
-  )
-```
-
-```{r}
-# Scatterplot matrix for delays and weather variables (sampled for performance)
-weather_vars <- df %>%
-  select(arr_delay, dep_delay, temp, wind_speed, visib)
-
-set.seed(123)
-weather_sample <- weather_vars %>%
-  sample_n(5000)   # reduce further (e.g., 2000) if knitting is still slow
-
-GGally::ggpairs(weather_sample) +
-  theme_minimal()
-```
-
+Overall, the analysis suggests that delay reduction should focus first on departure operations, then use carrier, seasonal, and weather-risk patterns for targeted scheduling and passenger communication improvements.
